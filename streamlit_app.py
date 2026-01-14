@@ -102,6 +102,48 @@ class AnalyticsEmailSender:
             st.sidebar.error(f"📧 メール送信エラー: {str(e)[:50]}...")
             return False
 
+class UsageLimiter:
+    """使用量制限管理クラス"""
+    
+    def __init__(self, daily_limit: int = 50):
+        self.daily_limit = daily_limit
+        
+    def check_and_update_usage(self) -> tuple[bool, int]:
+        """
+        使用量をチェック・更新
+        Returns: (利用可能かどうか, 残り回数)
+        """
+        # セッション単位での使用回数を管理
+        if 'query_count' not in st.session_state:
+            st.session_state.query_count = 0
+            
+        current_count = st.session_state.query_count
+        remaining = self.daily_limit - current_count
+        
+        if remaining <= 0:
+            return False, 0
+            
+        return True, remaining
+    
+    def increment_usage(self):
+        """使用回数を1回増やす"""
+        if 'query_count' not in st.session_state:
+            st.session_state.query_count = 0
+        st.session_state.query_count += 1
+    
+    def get_usage_info(self) -> dict:
+        """現在の使用状況を取得"""
+        current_count = st.session_state.get('query_count', 0)
+        remaining = self.daily_limit - current_count
+        usage_percentage = (current_count / self.daily_limit) * 100
+        
+        return {
+            'current': current_count,
+            'limit': self.daily_limit,
+            'remaining': max(0, remaining),
+            'percentage': min(100, usage_percentage)
+        }
+
 class StreamlitReActChatBot:
     """Streamlit用ReAct ChatBot"""
     
@@ -360,6 +402,23 @@ class StreamlitReActChatBot:
 
 def main():
     """Streamlit メイン関数"""
+    
+    # ✅ 最初に必要なセッション変数をすべて初期化
+    if "chatbot" not in st.session_state:
+        st.session_state.chatbot = StreamlitReActChatBot()
+        
+    if "email_sender" not in st.session_state:
+        st.session_state.email_sender = AnalyticsEmailSender()
+        
+    if "usage_limiter" not in st.session_state:
+        st.session_state.usage_limiter = UsageLimiter(daily_limit=50)
+        
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+        
+    if "initialized" not in st.session_state:
+        st.session_state.initialized = False
+    
     st.set_page_config(
         page_title="東京都就業規則 ChatBot",
         page_icon="🏢",
@@ -470,6 +529,27 @@ SMTP_EMAIL=your_email@gmail.com
 SMTP_PASSWORD=your_app_password
                 """)
         
+        # 使用量制限の表示
+        usage_info = st.session_state.usage_limiter.get_usage_info()
+        st.markdown("### 📊 使用状況")
+        
+        # プログレスバー
+        progress_value = usage_info['percentage'] / 100
+        st.progress(progress_value)
+        
+        # 使用状況の詳細
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("使用回数", f"{usage_info['current']}")
+        with col2:
+            st.metric("残り回数", f"{usage_info['remaining']}")
+            
+        # 制限に近づいた際の警告
+        if usage_info['remaining'] <= 10:
+            st.warning(f"⚠️ 残り{usage_info['remaining']}回です")
+        elif usage_info['remaining'] <= 5:
+            st.error(f"🚨 残り{usage_info['remaining']}回のみ！")
+        
         # モバイル向け簡潔な機能説明
         with st.expander("🏢 機能説明"):
             st.markdown("""
@@ -495,19 +575,6 @@ SMTP_PASSWORD=your_app_password
             if st.button("退職手続き"):
                 st.session_state.suggested_question = "退職する際の手続きを教えて"
     
-    # チャットボット・分析機能初期化
-    if "chatbot" not in st.session_state:
-        st.session_state.chatbot = StreamlitReActChatBot()
-        
-    if "email_sender" not in st.session_state:
-        st.session_state.email_sender = AnalyticsEmailSender()
-        
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-        
-    if "initialized" not in st.session_state:
-        st.session_state.initialized = False
-    
     # 初期化ボタン
     if not st.session_state.initialized:
         st.info("📁 PDFファイルを読み込んでチャットボットを初期化してください")
@@ -521,6 +588,16 @@ SMTP_PASSWORD=your_app_password
         if "suggested_question" in st.session_state:
             suggested = st.session_state.suggested_question
             del st.session_state.suggested_question
+            
+            # 🛡️ 使用量制限チェック（サジェスト質問）
+            can_proceed, remaining = st.session_state.usage_limiter.check_and_update_usage()
+            
+            if not can_proceed:
+                st.error("🚫 質問上限（50回）に達しました。ブラウザを更新するとリセットされます。")
+                st.stop()
+            
+            # 使用回数をカウントアップ
+            st.session_state.usage_limiter.increment_usage()
             
             # 📊 サジェスト質問の分析用メール送信（匿名化）
             try:
@@ -558,7 +635,17 @@ SMTP_PASSWORD=your_app_password
         
         # ユーザー入力（プレースホルダー最適化）
         if prompt := st.chat_input("例: 勤務時間は？ 有給休暇の取り方は？"):
-            # 📊 ユーザー入力の分析用メール送信（匿名化）
+            # �️ 使用量制限チェック
+            can_proceed, remaining = st.session_state.usage_limiter.check_and_update_usage()
+            
+            if not can_proceed:
+                st.error("🚫 質問上限（50回）に達しました。ブラウザを更新するとリセットされます。")
+                st.stop()
+            
+            # 使用回数をカウントアップ
+            st.session_state.usage_limiter.increment_usage()
+            
+            # �📊 ユーザー入力の分析用メール送信（匿名化）
             try:
                 if st.session_state.email_sender.send_user_input_analytics(prompt):
                     st.sidebar.success("📧 分析データ送信完了", icon="📊")
